@@ -151,6 +151,9 @@
     .allowance-period { font-size: 11px; color: rgba(255,255,255,0.4); font-weight:700; }
     .allowance-row { display: flex; justify-content: space-between; align-items: center; padding: 9px 16px; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 14px; }
     .allowance-total { font-weight: 900; color: var(--c1); font-size: 16px; }
+    .pay-btn { background: linear-gradient(135deg, var(--c1), #fbbf24); border: none; border-radius: 8px; color: #000; padding: 6px 12px; cursor: pointer; font-size: 12px; font-weight: 900; font-family: 'Nunito', sans-serif; white-space: nowrap; }
+    .payment-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 16px; border-bottom: 1px solid rgba(255,255,255,0.03); font-size: 13px; background: rgba(52,211,153,0.04); }
+    .remaining-row { display: flex; justify-content: space-between; align-items: center; padding: 9px 16px; background: rgba(255,255,255,0.03); border-top: 1px solid rgba(255,255,255,0.06); }
 
     .settings-card { background: var(--card); border-radius: 20px; padding: 20px; margin-bottom: 16px; }
     .settings-title { font-weight: 800; font-size: 15px; margin-bottom: 14px; }
@@ -377,6 +380,20 @@
     <div class="modal-actions">
       <button class="modal-cancel" onclick="closeBonus()">Cancel</button>
       <button class="modal-confirm" onclick="confirmBonus()">Add Bonus 💚</button>
+    </div>
+  </div>
+</div>
+
+<!-- PAYMENT MODAL -->
+<div class="modal-overlay" id="paymentModal">
+  <div class="modal">
+    <div class="modal-title">💵 Record Payment</div>
+    <div class="modal-subtitle" id="paymentModalSubtitle">for ...</div>
+    <input class="modal-input" id="paymentAmount" type="number" min="0" step="0.01" placeholder="Amount paid (e.g. 20.00)" />
+    <input class="modal-input" id="paymentDescription" type="text" placeholder="Description (e.g. bought a watch)" maxlength="80" />
+    <div class="modal-actions">
+      <button class="modal-cancel" onclick="closePaymentModal()">Cancel</button>
+      <button class="modal-confirm" onclick="savePayment()">💾 Record Payment</button>
     </div>
   </div>
 </div>
@@ -821,7 +838,7 @@
         const key = p.start_date + '_' + p.end_date + '_' + p.kid_id;
         if (!periodGroups[key]) periodGroups[key] = { start_date: p.start_date, end_date: p.end_date, entries: [] };
         periodGroups[key].entries.push(p);
-        if (!p.paid) totalUnpaid += parseFloat(p.total_dollars);
+        totalUnpaid += parseFloat(p.total_dollars);
       });
 
       // Group by date range for display
@@ -832,34 +849,79 @@
         dateGroups[key].kids.push(p);
       });
 
+      // Load payments for all periods
+      const { data: allPayments } = await db.from('payments').select('*').eq('family_code', FAMILY_CODE).order('paid_at', { ascending: true });
+      const paymentsByPeriod = {};
+      (allPayments || []).forEach(pay => {
+        const key = pay.allowance_period_id + '_' + pay.kid_id;
+        if (!paymentsByPeriod[key]) paymentsByPeriod[key] = [];
+        paymentsByPeriod[key].push(pay);
+      });
+
       Object.values(dateGroups).forEach(pg => {
-        const allPaid = pg.kids.every(p => p.paid);
         const periodTotal = pg.kids.reduce((sum, p) => sum + parseFloat(p.total_dollars), 0);
+        const periodPaid = pg.kids.reduce((sum, p) => {
+          const key = p.id + '_' + p.kid_id;
+          return sum + (paymentsByPeriod[key] || []).reduce((s, pay) => s + parseFloat(pay.amount), 0);
+        }, 0);
+        const remaining = periodTotal - periodPaid;
+        const fullyPaid = remaining <= 0;
+
         html += `<div class="allowance-card">
           <div class="allowance-header">
             <span class="allowance-title">💵 Allowance</span>
             <span class="allowance-period">${formatDate(pg.start_date)} → ${formatDate(pg.end_date)}</span>
           </div>`;
+
         pg.kids.forEach(p => {
           const kidName = kids.find(k => k.id === p.kid_id)?.name || 'Unknown';
+          const key = p.id + '_' + p.kid_id;
+          const kidPayments = paymentsByPeriod[key] || [];
+          const kidPaid = kidPayments.reduce((s, pay) => s + parseFloat(pay.amount), 0);
+          const kidRemaining = parseFloat(p.total_dollars) - kidPaid;
+          const kidFullyPaid = kidRemaining <= 0;
+
           html += `<div class="allowance-row">
             <span style="font-weight:800">${kidName}</span>
-            <div style="display:flex;align-items:center;gap:12px;">
+            <div style="display:flex;align-items:center;gap:10px;">
               <span class="allowance-total">$${parseFloat(p.total_dollars).toFixed(2)}</span>
-              <label style="display:flex;align-items:center;gap:5px;cursor:pointer;font-size:12px;font-weight:800;color:${p.paid?'var(--c2)':'rgba(255,255,255,0.4)'};">
-                <input type="checkbox" ${p.paid?'checked':''} onchange="togglePaid(${p.id}, this.checked)" style="width:16px;height:16px;accent-color:var(--c2);cursor:pointer;" />
-                ${p.paid ? 'Paid ✓' : 'Mark as Paid'}
-              </label>
+              <button class="pay-btn" onclick="openPaymentModal(${p.id},${p.kid_id},'${kidName}')" ${kidFullyPaid ? 'style="background:var(--c2);opacity:0.7;"' : ''}>
+                ${kidFullyPaid ? '✓ Paid' : '+ Pay'}
+              </button>
             </div>
           </div>`;
+
+          // Show individual payments
+          kidPayments.forEach(pay => {
+            const d = new Date(pay.paid_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+            html += `<div class="payment-row">
+              <span style="color:var(--c2);">✓ ${d}${pay.description ? ' · ' + pay.description : ''}</span>
+              <span style="font-weight:800;color:var(--c2);">$${parseFloat(pay.amount).toFixed(2)}</span>
+            </div>`;
+          });
+
+          // Show remaining per kid
+          if (kidPayments.length > 0 && !kidFullyPaid) {
+            html += `<div class="remaining-row">
+              <span style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.4);">REMAINING</span>
+              <span style="font-weight:900;color:#ef4444;">$${kidRemaining.toFixed(2)}</span>
+            </div>`;
+          }
         });
+
+        // Period summary
         html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 16px;background:rgba(255,255,255,0.03);border-top:1px solid rgba(255,255,255,0.06);">
-          <span style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.4);">PERIOD TOTAL</span>
-          <span style="font-weight:900;color:${allPaid?'var(--c2)':'var(--c1)'};">$${periodTotal.toFixed(2)} ${allPaid?'✓':''}</span>
+          <span style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.4);">PERIOD TOTAL · ${fullyPaid ? 'FULLY PAID ✓' : 'REMAINING'}</span>
+          <span style="font-weight:900;color:${fullyPaid ? 'var(--c2)' : '#ef4444'};">${fullyPaid ? '$' + periodTotal.toFixed(2) : '$' + remaining.toFixed(2)}</span>
         </div>`;
         html += '</div>';
       });
     }
+
+    // Subtract all payments from totalUnpaid
+    const { data: allPay } = await db.from('payments').select('amount').eq('family_code', FAMILY_CODE);
+    const totalPaidSoFar = (allPay || []).reduce((s, p) => s + parseFloat(p.amount), 0);
+    totalUnpaid = Math.max(0, totalUnpaid - totalPaidSoFar);
 
     // Total unpaid banner
     if (totalUnpaid > 0) {
@@ -1272,6 +1334,44 @@
     );
     if (error) { console.error(error); alert('Error saving admin defaults'); return; }
     showToast('✅ Default config saved for new families!');
+  }
+
+  // ── PAYMENTS ──────────────────────────────────────
+  let paymentPeriodId = null;
+  let paymentKidId = null;
+  let paymentKidName = '';
+
+  function openPaymentModal(periodId, kidId, kidName) {
+    paymentPeriodId = periodId;
+    paymentKidId = kidId;
+    paymentKidName = kidName;
+    document.getElementById('paymentModalSubtitle').textContent = `for ${kidName}`;
+    document.getElementById('paymentAmount').value = '';
+    document.getElementById('paymentDescription').value = '';
+    document.getElementById('paymentModal').classList.add('open');
+    setTimeout(() => document.getElementById('paymentAmount').focus(), 100);
+  }
+
+  function closePaymentModal() {
+    document.getElementById('paymentModal').classList.remove('open');
+    paymentPeriodId = null; paymentKidId = null;
+  }
+
+  async function savePayment() {
+    const amount = parseFloat(document.getElementById('paymentAmount').value);
+    const description = document.getElementById('paymentDescription').value.trim();
+    if (!amount || amount <= 0) { alert('Please enter a valid amount'); return; }
+    const { error } = await db.from('payments').insert({
+      allowance_period_id: paymentPeriodId,
+      kid_id: paymentKidId,
+      family_code: FAMILY_CODE,
+      amount,
+      description: description || null,
+    });
+    if (error) { console.error(error); alert('Error saving payment'); return; }
+    closePaymentModal();
+    showToast(`💵 $${amount.toFixed(2)} payment recorded for ${paymentKidName}!`);
+    renderHistory();
   }
 
   // ── PAID TOGGLE ───────────────────────────────────
